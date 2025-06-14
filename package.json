@@ -1,0 +1,14 @@
+{
+  "name": "easysell-otp-server",
+  "version": "1.0.0",
+  "description": "OTP verification server for EasySell using Semaphore",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "axios": "^1.6.7",
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2"
+  }
+}
