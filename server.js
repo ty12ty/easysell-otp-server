@@ -41,70 +41,276 @@ await redisClient.connect();
 console.log("✅ Connected to Redis");
 
 // ----------------------------
-// ✅ 6) 发送 OTP
+// ✅ 电话号码清洗与校正函数
+// ----------------------------
+function sanitizePhoneNumber(phone) {
+  // 1. 移除非数字字符
+  let cleaned = phone.replace(/\D/g, '');
+  
+  // 2. 处理630开头的情况（菲律宾常见错误格式）
+  if (cleaned.startsWith('630') && cleaned.length >= 12) {
+    // 6309... -> 639...
+    cleaned = '63' + cleaned.substring(3);
+  }
+  
+  // 3. 处理63开头但长度超过12位的情况
+  if (cleaned.startsWith('63') && cleaned.length > 12) {
+    cleaned = cleaned.substring(0, 12);
+  }
+  
+  // 4. 处理09开头（菲律宾本地格式）
+  if (cleaned.startsWith('09') && cleaned.length === 11) {
+    cleaned = '63' + cleaned.substring(1);
+  }
+  
+  // 5. 添加缺少的63前缀
+  if (cleaned.startsWith('9') && cleaned.length === 10) {
+    cleaned = '63' + cleaned;
+  }
+  
+  return cleaned;
+}
+
+// ----------------------------
+// ✅ 6) 发送 OTP (优化版)
 // ----------------------------
 app.post("/send-otp", async (req, res) => {
-  const { phone } = req.body;
+  let { phone } = req.body;
+  
+  // 清洗电话号码
+  phone = sanitizePhoneNumber(phone);
+  
+  // 菲律宾手机号验证 (639开头 + 9位数字 = 12位)
+  const phRegex = /^639\d{9}$/;
+  if (!phone || !phRegex.test(phone)) {
+    return res.status(400).json({ 
+      success: false,
+      error: "Invalid Philippine number. Must be 639XXXXXXXXX format (12 digits).",
+      corrected_phone: phone
+    });
+  }
 
-  if (!phone) return res.status(400).json({ error: "Phone is required" });
-
-  const otp = Math.floor(100000 + Math.random() * 900000).toString();
-  const expireSeconds = 300;
+  // 频率限制检查
+  const rateKey = `rate:${phone}`;
+  const attempts = await redisClient.get(rateKey) || 0;
+  
+  // 限制规则：60秒内最多1次，每天最多3次
+  if (parseInt(attempts) >= 3) {
+    return res.status(429).json({
+      success: false,
+      error: "Too many requests. Please try again later."
+    });
+  }
 
   try {
-    // 1) 存 OTP 到 Redis
-    await redisClient.setEx(phone, expireSeconds, otp);
+    // 构造基础消息
+    let message = "Pakigamit ang OTP {otp} to confirm your order.";
+    
+    // 动态添加Sender Name（如果已启用）
+    if (process.env.SEMAPHORE_USE_SENDER === 'true' && process.env.SEMAPHORE_SENDER_NAME) {
+      message = `${process.env.SEMAPHORE_SENDER_NAME}: ${message}`;
+    }
 
-    // 2) 组装短信内容 (推荐用 {otp}，Semaphore 会替换)
-    const message = `DURANTGRACE: Pakigamit ang OTP {otp} to confirm your order.`;
+    // 准备API请求参数
+    const requestParams = {
+      apikey: process.env.SEMAPHORE_API_KEY,
+      number: phone,
+      message: message
+    };
+    
+    // 添加Sender Name参数（如果已启用）
+    if (process.env.SEMAPHORE_USE_SENDER === 'true' && process.env.SEMAPHORE_SENDER_NAME) {
+      requestParams.sendername = process.env.SEMAPHORE_SENDER_NAME;
+    }
 
-    // 3) 调用 Semaphore /otp，带 code 确保使用自己生成的
+    // 调用Semaphore OTP API
     const response = await axios.post(
       "https://api.semaphore.co/api/v4/otp",
-      null,
+      new URLSearchParams(requestParams),
       {
-        params: {
-          apikey: process.env.SEMAPHORE_API_KEY,
-          number: phone,
-          message: message,
-          code: otp, // ✅ 用自己生成的
-        },
+        headers: {
+          "Content-Type": "application/x-www-form-urlencoded"
+        }
       }
     );
 
-    res.json({ success: true, data: response.data });
+    // 检查API响应
+    if (response.status !== 200 || !response.data?.[0]?.code) {
+      throw new Error("Invalid response from Semaphore API");
+    }
+
+    // 从Semaphore响应中获取实际发送的OTP
+    const semaphoreData = response.data[0];
+    const otpCode = semaphoreData.code.toString();
+    
+    // 存储OTP到Redis
+    const redisKey = `otp:${phone}`;
+    await redisClient.setEx(redisKey, 300, otpCode); // 5分钟有效期
+    
+    // 更新频率计数器 (24小时过期)
+    await redisClient.setEx(rateKey, 86400, parseInt(attempts) + 1);
+    
+    // 记录成功日志
+    const senderMode = process.env.SEMAPHORE_USE_SENDER === 'true' ? 
+      `with sender ${process.env.SEMAPHORE_SENDER_NAME}` : 
+      "via official channel";
+      
+    console.log(`📤 OTP sent to ${phone} ${senderMode} (ID: ${semaphoreData.message_id})`);
+    
+    res.json({ 
+      success: true, 
+      message_id: semaphoreData.message_id,
+      message: "OTP sent successfully",
+      corrected_phone: phone  // 返回校正后的号码
+    });
+    
   } catch (error) {
-    console.error("❌ Failed to send OTP:", error.response?.data || error.message);
-    res.status(500).json({ success: false, error: "Failed to send OTP" });
+    console.error("❌ Semaphore API error:", error.response?.data || error.message);
+    
+    // 构造错误信息
+    let errorMsg = "Failed to send OTP";
+    if (error.response?.data?.error) {
+      errorMsg += `: ${error.response.data.error}`;
+    } else if (error.message) {
+      errorMsg += `: ${error.message}`;
+    }
+    
+    res.status(500).json({ 
+      success: false, 
+      error: errorMsg,
+      corrected_phone: phone
+    });
   }
 });
 
 // ----------------------------
-// ✅ 7) 验证 OTP
+// ✅ 7) 验证 OTP (优化版)
 // ----------------------------
 app.post("/verify-otp", async (req, res) => {
-  const { phone, otp } = req.body;
-
-  if (!phone || !otp) return res.status(400).json({ error: "Phone and OTP are required" });
+  let { phone, otp } = req.body;
+  
+  // 清洗电话号码
+  phone = sanitizePhoneNumber(phone);
+  
+  // 菲律宾号码格式验证
+  const phRegex = /^639\d{9}$/;
+  if (!phone || !otp || !phRegex.test(phone)) {
+    return res.status(400).json({ 
+      success: false,
+      error: "Invalid phone or OTP format",
+      corrected_phone: phone
+    });
+  }
 
   try {
-    const savedOtp = await redisClient.get(phone);
+    const redisKey = `otp:${phone}`;
+    const savedOtp = await redisClient.get(redisKey);
 
-    if (savedOtp === otp) {
-      await redisClient.del(phone); // 验证后删除
-      res.json({ success: true, message: "OTP verified!" });
-    } else {
-      res.status(400).json({ success: false, error: "Invalid OTP" });
+    // 处理OTP不存在或过期
+    if (!savedOtp) {
+      return res.status(404).json({ 
+        success: false, 
+        error: "OTP expired or not requested. Please request a new OTP." 
+      });
     }
+
+    // 验证时忽略空格和前导零
+    const cleanSavedOtp = savedOtp.trim();
+    const cleanUserOtp = otp.trim().replace(/^0+/, '');
+    
+    if (cleanSavedOtp === cleanUserOtp) {
+      // 验证成功后删除OTP和频率计数
+      await redisClient.del(redisKey);
+      await redisClient.del(`rate:${phone}`);
+      
+      console.log(`✅ OTP verified for ${phone}`);
+      
+      return res.json({ 
+        success: true, 
+        message: "OTP verified successfully!" 
+      });
+    }
+    
+    // 验证失败处理
+    const attemptKey = `attempt:${phone}`;
+    const attempts = await redisClient.incr(attemptKey);
+    
+    // 设置尝试次数过期时间（首次设置）
+    if (attempts === 1) {
+      await redisClient.expire(attemptKey, 300); // 5分钟窗口
+    }
+    
+    // 超过最大尝试次数
+    if (attempts >= 5) {
+      // 使OTP失效并清除尝试计数
+      await redisClient.del(redisKey);
+      await redisClient.del(attemptKey);
+      
+      return res.status(403).json({
+        success: false,
+        error: "Maximum attempts exceeded. Please request a new OTP."
+      });
+    }
+    
+    res.status(400).json({
+      success: false,
+      error: "Invalid OTP",
+      attempts_left: 5 - attempts
+    });
+    
   } catch (error) {
-    console.error("❌ Failed to verify OTP:", error.message);
-    res.status(500).json({ success: false, error: "Internal server error" });
+    console.error("❌ Verification error:", error.message);
+    res.status(500).json({
+      success: false,
+      error: "Internal server error"
+    });
   }
 });
 
 // ----------------------------
-// ✅ 8) 启动服务器
+// ✅ 8) Sender状态检查端点
+// ----------------------------
+app.get('/sender-status', (req, res) => {
+  const usingCustomSender = process.env.SEMAPHORE_USE_SENDER === 'true';
+  const senderName = process.env.SEMAPHORE_SENDER_NAME || '';
+  
+  res.json({
+    success: true,
+    using_custom_sender: usingCustomSender,
+    sender_name: usingCustomSender ? senderName : 'Official',
+    status: usingCustomSender ? 'Active' : 'Using default sender'
+  });
+});
+
+// ----------------------------
+// ✅ 9) 健康检查端点
+// ----------------------------
+app.get('/health', async (req, res) => {
+  try {
+    // 检查Redis连接
+    await redisClient.ping();
+    res.json({
+      status: 'OK',
+      redis: 'connected',
+      server_time: new Date().toISOString()
+    });
+  } catch (error) {
+    res.status(500).json({
+      status: 'ERROR',
+      redis: 'disconnected',
+      error: error.message
+    });
+  }
+});
+
+// ----------------------------
+// ✅ 10) 启动服务器
 // ----------------------------
 app.listen(port, () => {
   console.log(`🚀 Server running on port ${port}`);
+  console.log(`📱 Sender Mode: ${
+    process.env.SEMAPHORE_USE_SENDER === 'true' 
+      ? `Custom (${process.env.SEMAPHORE_SENDER_NAME})` 
+      : 'Official'
+  }`);
 });
