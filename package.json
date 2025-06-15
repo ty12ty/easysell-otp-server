@@ -1,7 +1,7 @@
 {
   "name": "otp-server",
-  "version": "1.0.0",
-  "description": "EasySell OTP verification server for Philippines market",
+  "version": "1.2.0",
+  "description": "Secure OTP verification server for Philippine market",
   "type": "module",
   "main": "server.js",
   "scripts": {
