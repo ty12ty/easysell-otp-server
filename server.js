@@ -207,19 +207,10 @@ app.post('/send-otp', async (req, res) => {
   
   try {
     // 构造基础消息
-    let message = "Your verification code is {otp}. Use it within 5 minutes.";
-    
-    // 动态添加Sender Name（如果已启用）
-    if (process.env.SEMAPHORE_USE_SENDER === 'true' && process.env.SEMAPHORE_SENDER_NAME) {
-      message = `${process.env.SEMAPHORE_SENDER_NAME}: ${message}`;
-    }
-    
-    // 准备API请求参数
-    const requestParams = {
-      apikey: process.env.SEMAPHORE_API_KEY,
-      number: phone,
-      message: message
-    };
+const requestParams = {
+  apikey: process.env.SEMAPHORE_API_KEY,
+  number: phone
+};
     
     // 添加Sender Name参数（如果已启用）
     if (process.env.SEMAPHORE_USE_SENDER === 'true' && process.env.SEMAPHORE_SENDER_NAME) {
