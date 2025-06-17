@@ -1,79 +1,75 @@
-const express = require("express");
-const axios = require("axios");
+require('dotenv').config();
+const express = require('express');
+const bodyParser = require('body-parser');
+const axios = require('axios');
+const Redis = require('ioredis');
+
 const app = express();
-const PORT = process.env.PORT || 3000;
+app.use(bodyParser.json());
 
-app.use(express.json());
+// 初始化 Redis
+const redis = new Redis(process.env.REDIS_URL);
 
-// 你在 Render 的环境变量里设置 SE MAPHORE_API_KEY 和 SENDERNAME（可选）
-const API_KEY = process.env.SEMAPHORE_API_KEY;
-const SENDERNAME = process.env.SENDERNAME; // 可以没有
+// 生成 6 位随机 OTP
+function generateOTP() {
+  return Math.floor(100000 + Math.random() * 900000).toString();
+}
 
-app.post("/send-otp", async (req, res) => {
-  const { number } = req.body;
+// 发送 OTP
+app.post('/send-otp', async (req, res) => {
+  const { phone } = req.body;
+  if (!phone) {
+    return res.status(400).json({ error: 'Phone number is required' });
+  }
+
+  const otp = generateOTP();
+
+  // 保存到 Redis，设置过期时间 5 分钟
+  await redis.set(`otp:${phone}`, otp, 'EX', 300);
 
   try {
-    const payload = {
-      number: number,
-      message: "Your OTP code is {otp}. Do not share this code with anyone."
+    let message = `Your verification code is ${otp}`;
+    let params = {
+      apikey: process.env.SEMAPHORE_API_KEY,
+      number: phone,
+      message: message
     };
 
-    // 如果 SENDERNAME 已经设置，包含 sendername，否则让 Semaphore 用默认 sender
-    if (SENDERNAME) {
-      payload.sendername = SENDERNAME;
+    if (process.env.SEMAPHORE_USE_SENDER === 'true') {
+      params.sendername = process.env.SEMAPHORE_SENDER_NAME;
     }
 
-    const response = await axios.post(
-      "https://api.semaphore.co/api/v4/otp",
-      payload,
-      {
-        headers: {
-          "Content-Type": "application/json",
-          "Accept": "application/json",
-          "Authorization": `Bearer ${API_KEY}`
-        }
-      }
-    );
-
-    res.json(response.data);
-  } catch (error) {
-    console.error("Send OTP failed:", error.response ? error.response.data : error.message);
-    res.status(500).json({
-      error: error.response ? error.response.data : error.message
+    const response = await axios.post('https://api.semaphore.co/api/v4/messages', params, {
+      headers: { 'Content-Type': 'application/json' }
     });
+
+    console.log('Semaphore API response:', response.data);
+
+    res.json({ success: true, otp: otp, response: response.data });
+  } catch (error) {
+    console.error('Semaphore API error:', error.response ? error.response.data : error.message);
+    res.status(500).json({ error: 'Failed to send OTP' });
   }
 });
 
-app.post("/verify-otp", async (req, res) => {
-  const { number, otp } = req.body;
+// 验证 OTP
+app.post('/verify-otp', async (req, res) => {
+  const { phone, otp } = req.body;
+  if (!phone || !otp) {
+    return res.status(400).json({ error: 'Phone and OTP are required' });
+  }
 
-  try {
-    const payload = {
-      number: number,
-      otp: otp
-    };
-
-    const response = await axios.post(
-      "https://api.semaphore.co/api/v4/otp/verify",
-      payload,
-      {
-        headers: {
-          "Content-Type": "application/json",
-          "Accept": "application/json",
-          "Authorization": `Bearer ${API_KEY}`
-        }
-      }
-    );
-
-    res.json(response.data);
-  } catch (error) {
-    console.error("Verify OTP failed:", error.response ? error.response.data : error.message);
-    res.status(500).json({
-      error: error.response ? error.response.data : error.message
-    });
+  const storedOtp = await redis.get(`otp:${phone}`);
+  if (storedOtp === otp) {
+    // 验证成功后删除 OTP
+    await redis.del(`otp:${phone}`);
+    return res.json({ success: true, message: 'OTP verified successfully' });
+  } else {
+    return res.status(400).json({ success: false, message: 'Invalid OTP' });
   }
 });
 
+const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
+  console.log(`OTP server running on port ${PORT}`);
 });
