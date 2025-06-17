@@ -1,77 +1,76 @@
-const express = require('express');
-const bodyParser = require('body-parser');
-const axios = require('axios');
-require('dotenv').config();
-
+const express = require("express");
+const axios = require("axios");
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-app.use(bodyParser.json());
-app.use(bodyParser.urlencoded({ extended: true }));
+app.use(express.json());
 
-// ✅ SEND OTP 路由
-app.post('/send-otp', async (req, res) => {
+// 你在 Render 的环境变量里设置 SE MAPHORE_API_KEY 和 SENDERNAME（可选）
+const API_KEY = process.env.SEMAPHORE_API_KEY;
+const SENDERNAME = process.env.SENDERNAME; // 可以没有
+
+app.post("/send-otp", async (req, res) => {
+  const { number } = req.body;
+
   try {
-    const phone = req.body.phone;
-
-    const requestParams = {
-      apikey: process.env.SEMAPHORE_API_KEY,
-      number: phone
+    const payload = {
+      number: number,
+      message: "Your OTP code is {otp}. Do not share this code with anyone."
     };
 
-    // ✅ 如果环境变量启用 sendername 且有值就加上
-    if (
-      process.env.SEMAPHORE_USE_SENDER === 'true' &&
-      process.env.SEMAPHORE_SENDER_NAME &&
-      process.env.SEMAPHORE_SENDER_NAME.trim() !== ''
-    ) {
-      requestParams.sendername = process.env.SEMAPHORE_SENDER_NAME;
+    // 如果 SENDERNAME 已经设置，包含 sendername，否则让 Semaphore 用默认 sender
+    if (SENDERNAME) {
+      payload.sendername = SENDERNAME;
     }
 
     const response = await axios.post(
       "https://api.semaphore.co/api/v4/otp",
-      new URLSearchParams(requestParams),
+      payload,
       {
         headers: {
-          "Content-Type": "application/x-www-form-urlencoded"
+          "Content-Type": "application/json",
+          "Accept": "application/json",
+          "Authorization": `Bearer ${API_KEY}`
         }
       }
     );
 
     res.json(response.data);
-
   } catch (error) {
-    console.error(error.response ? error.response.data : error.message);
-    res.status(500).json({ error: error.response ? error.response.data : error.message });
+    console.error("Send OTP failed:", error.response ? error.response.data : error.message);
+    res.status(500).json({
+      error: error.response ? error.response.data : error.message
+    });
   }
 });
 
-// ✅ VERIFY OTP 路由
-app.post('/verify-otp', async (req, res) => {
-  try {
-    const { phone, code } = req.body;
+app.post("/verify-otp", async (req, res) => {
+  const { number, otp } = req.body;
 
-    const requestParams = {
-      apikey: process.env.SEMAPHORE_API_KEY,
-      number: phone,
-      code: code
+  try {
+    const payload = {
+      number: number,
+      otp: otp
     };
 
     const response = await axios.post(
       "https://api.semaphore.co/api/v4/otp/verify",
-      new URLSearchParams(requestParams),
+      payload,
       {
         headers: {
-          "Content-Type": "application/x-www-form-urlencoded"
+          "Content-Type": "application/json",
+          "Accept": "application/json",
+          "Authorization": `Bearer ${API_KEY}`
         }
       }
     );
 
     res.json(response.data);
-
   } catch (error) {
-    console.error(error.response ? error.response.data : error.message);
-    res.status(500).json({ error: error.response ? error.response.data : error.message });
+    console.error("Verify OTP failed:", error.response ? error.response.data : error.message);
+    res.status(500).json({
+      error: error.response ? error.response.data : error.message
+    });
   }
 });
 
