@@ -1,7 +1,7 @@
 {
   "name": "semaphore-otp-server",
   "version": "1.0.0",
-  "description": "Custom OTP Server for Semaphore API",
+  "description": "A simple OTP server using Semaphore's /messages API and Redis.",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
@@ -10,11 +10,8 @@
     "axios": "^1.6.8",
     "body-parser": "^1.20.2",
     "cors": "^2.8.5",
-    "dotenv": "^16.4.5",
+    "dotenv": "^16.3.2",
     "express": "^4.19.2",
-    "ioredis": "^5.3.2"
-  },
-  "engines": {
-    "node": ">=18"
+    "ioredis": "^5.4.1"
   }
 }
