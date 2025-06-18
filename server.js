@@ -2,87 +2,75 @@ require('dotenv').config();
 const express = require('express');
 const axios = require('axios');
 const Redis = require('ioredis');
+const bodyParser = require('body-parser');
+const cors = require('cors');
 
 const app = express();
-app.use(express.json());
+app.use(cors());
+app.use(bodyParser.json());
 
-// Redis 配置
+// Redis 实例
 const redis = new Redis(process.env.REDIS_URL);
 
-// Semaphore 配置
-const SEMAPHORE_API_KEY = process.env.SEMAPHORE_API_KEY;
-const SEMAPHORE_SENDER_NAME = process.env.SEMAPHORE_SENDER_NAME;
-const SEMAPHORE_USE_SENDER = process.env.SEMAPHORE_USE_SENDER === 'true';
-
-// 生成随机 6 位 OTP
-function generateOTP() {
-  return Math.floor(100000 + Math.random() * 900000);
-}
-
-// 发送 OTP
+// Send OTP
 app.post('/send-otp', async (req, res) => {
+  const { phone } = req.body;
+  if (!phone) return res.status(400).json({ success: false, message: 'Phone number required' });
+
   try {
-    const { phone } = req.body;
-    if (!phone) return res.status(400).json({ error: 'Phone number is required' });
+    // 生成 6 位 OTP
+    const otp = Math.floor(100000 + Math.random() * 900000);
 
-    const otp = generateOTP();
-    const message = `Your verification code is ${otp}`;
+    // Semaphore 专用 OTP 路由参数
+    const params = new URLSearchParams();
+    params.append('apikey', process.env.SEMAPHORE_API_KEY);
+    params.append('number', phone);
+    params.append('message', `Your OTP code is {otp}.`);
+    params.append('code', otp);
 
-    const data = {
-      apikey: SEMAPHORE_API_KEY,
-      number: phone,
-      message: message,
-      type: 'otp'
-    };
-
-    if (SEMAPHORE_USE_SENDER) {
-      data.sendername = SEMAPHORE_SENDER_NAME;
+    // 是否使用自定义 Sender Name
+    if (process.env.SEMAPHORE_USE_SENDER === 'true') {
+      params.append('sendername', process.env.SEMAPHORE_SENDER_NAME);
     }
 
-    const response = await axios.post('https://api.semaphore.co/api/v4/messages', data);
-
-    // 保存 OTP 到 Redis，过期时间 5 分钟
-    await redis.setex(phone, 300, otp);
-
-    res.json({
-      success: true,
-      otp: otp,
-      response: response.data
+    // 请求 Semaphore OTP 路由
+    const response = await axios.post('https://api.semaphore.co/api/v4/otp', params, {
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
     });
+
+    // Redis 存储，5分钟
+    await redis.setex(`otp:${phone}`, 300, otp);
+
+    console.log('Semaphore OTP Response:', response.data);
+
+    res.json({ success: true, otp, response: response.data });
   } catch (error) {
-    console.error('Error sending OTP:', error.response ? error.response.data : error.message);
-    res.status(500).json({
-      success: false,
-      error: error.response ? error.response.data : error.message
-    });
+    console.error(error.response ? error.response.data : error.message);
+    res.status(500).json({ success: false, message: 'Failed to send OTP', error: error.response?.data || error.message });
   }
 });
 
-// 验证 OTP
+// Verify OTP
 app.post('/verify-otp', async (req, res) => {
+  const { phone, otp } = req.body;
+  if (!phone || !otp) return res.status(400).json({ success: false, message: 'Phone and OTP required' });
+
   try {
-    const { phone, otp } = req.body;
-    if (!phone || !otp) return res.status(400).json({ error: 'Phone and OTP are required' });
-
-    const savedOtp = await redis.get(phone);
-    if (!savedOtp) {
-      return res.status(400).json({ success: false, message: 'OTP expired or not found' });
-    }
-
+    const savedOtp = await redis.get(`otp:${phone}`);
     if (savedOtp === otp) {
-      await redis.del(phone); // 验证成功后删除
-      return res.json({ success: true, message: 'OTP verified successfully' });
+      await redis.del(`otp:${phone}`);
+      return res.json({ success: true, message: 'OTP verified' });
     } else {
       return res.status(400).json({ success: false, message: 'Invalid OTP' });
     }
   } catch (error) {
-    console.error('Error verifying OTP:', error.message);
-    res.status(500).json({ success: false, error: error.message });
+    console.error(error);
+    res.status(500).json({ success: false, message: 'Verification failed', error: error.message });
   }
 });
 
 // 启动
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
+  console.log(`OTP server running on port ${PORT}`);
 });
