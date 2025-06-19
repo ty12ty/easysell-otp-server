@@ -9,31 +9,47 @@ const app = express();
 app.use(cors());
 app.use(bodyParser.json());
 
-// === Redis 配置 ===
 const redis = new Redis(process.env.REDIS_URL);
 
-// === 配置 ===
 const apiKey = process.env.SEMAPHORE_API_KEY;
 const useSender = process.env.SEMAPHORE_USE_SENDER === 'true';
 const senderName = process.env.SEMAPHORE_SENDER_NAME;
 
-// === 📤 发送 OTP （只用 /messages）===
-app.post('/send-otp', async (req, res) => {
-  let { number } = req.body;
+// === 📞 统一格式化菲律宾手机号 ===
+function normalizePhilippineNumber(input) {
+  let number = String(input).replace(/\D/g, '');
 
-  // 自动修正菲律宾手机号
-  if (number.startsWith('09')) {
+  if (number.startsWith('6309')) {
+    number = '639' + number.slice(4);
+  } else if (number.startsWith('09')) {
     number = '63' + number.slice(1);
-  } else if (number.startsWith('6309')) {
-    number = '639' + number.slice(3);
+  } else if (number.startsWith('639')) {
+    // OK
+  } else if (number.startsWith('63') && number.length === 12) {
+    // OK
+  } else if (number.startsWith('9') && number.length === 10) {
+    number = '63' + number;
+  } else {
+    throw new Error('Invalid Philippine mobile number format.');
+  }
+
+  return number;
+}
+
+// === 📤 发送 OTP ===
+app.post('/send-otp', async (req, res) => {
+  let number;
+  try {
+    number = normalizePhilippineNumber(req.body.number);
+  } catch (err) {
+    return res.status(400).json({ success: false, error: err.message });
   }
 
   try {
-    // ✅ 自行生成 6 位 OTP
+    // 自行生成 6 位 OTP
     const otp = Math.floor(100000 + Math.random() * 900000).toString();
     const message = `Your OTP code is ${otp}. Please use it within 5 minutes.`;
 
-    // 发送到 /messages
     const params = {
       apikey: apiKey,
       number,
@@ -44,9 +60,10 @@ app.post('/send-otp', async (req, res) => {
       params.sendername = senderName;
     }
 
+    // 发送到 Semaphore /messages
     await axios.post('https://semaphore.co/api/v4/messages', null, { params });
 
-    // Redis 保存 OTP，5分钟过期
+    // 缓存 OTP
     await redis.setex(number, 300, otp);
 
     res.json({ success: true, otp, response: 'Sent via /messages with custom OTP' });
@@ -59,13 +76,14 @@ app.post('/send-otp', async (req, res) => {
 
 // === ✅ 验证 OTP ===
 app.post('/verify-otp', async (req, res) => {
-  let { number, otp } = req.body;
-
-  if (number.startsWith('09')) {
-    number = '63' + number.slice(1);
-  } else if (number.startsWith('6309')) {
-    number = '639' + number.slice(3);
+  let number;
+  try {
+    number = normalizePhilippineNumber(req.body.number);
+  } catch (err) {
+    return res.status(400).json({ success: false, error: err.message });
   }
+
+  const otp = req.body.otp;
 
   const storedOtp = await redis.get(number);
 
